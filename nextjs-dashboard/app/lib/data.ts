@@ -1,236 +1,177 @@
 import postgres from 'postgres';
-import {
-  CustomerField,
-  CustomersTableType,
-  InvoiceForm,
-  InvoicesTable,
-  LatestInvoiceRaw,
-  Revenue,
-} from './definitions';
-import { formatCurrency } from './utils';
+import { InvoicesTable, Revenue } from './definitions';
+import { normalizeTableName } from './auth';
 
-const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+export type StockRow = Record<string, unknown>;
 
-export async function fetchRevenue() {
-  try {
-    // Artificially delay a response for demo purposes.
-    // Don't do this in production :)
-
-    console.log('Fetching revenue data...');
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    const data = await sql<Revenue[]>`SELECT * FROM "base table";`;
-
-    // console.log('Data fetch completed after 3 seconds.');
-
-    return data;
-  } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch revenue data.');
+function readEnv(...keys: string[]): string {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value && value.trim().length > 0) {
+      const trimmed = value.trim();
+      return trimmed.replace(/^['"](.*)['"]$/, '$1');
+    }
   }
+  return '';
 }
 
+function createSqlClient() {
+  const connectionString = readEnv('DATABASE_URL', 'POSTGRES_URL');
+
+  if (!connectionString) {
+    throw new Error('Missing DATABASE_URL or POSTGRES_URL environment variable.');
+  }
+
+  return postgres(connectionString, { ssl: 'require' });
+}
+
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function toSqlLiteral(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'NULL';
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : 'NULL';
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'TRUE' : 'FALSE';
+  }
+
+  if (value instanceof Date) {
+    return `'${value.toISOString().replace(/'/g, "''")}'`;
+  }
+
+  if (typeof value === 'object') {
+    return `'${JSON.stringify(value).replace(/'/g, "''")}'::jsonb`;
+  }
+
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function resolveTableName(input: string): string {
+  const cleanInput = input.trim();
+  if (!cleanInput) {
+    return '';
+  }
+
+  const user1Id = readEnv('USER1_ID');
+  const user2Id = readEnv('USER2_ID');
+  const table1 = readEnv('TABLE1_NAME');
+  const table2 = readEnv('TABLE2_NAME');
+
+  if (cleanInput === user1Id) {
+    return table1;
+  }
+
+  if (cleanInput === user2Id) {
+    return table2;
+  }
+
+  // Backward-compatible: treat unknown input as an explicit table name,
+  // then normalize legacy aliases such as stock_table1.
+  return normalizeTableName(cleanInput);
+}
+
+// export async function fetchRevenue() {
+//   const sql = createSqlClient();
+
+//   try {
+//     const tableName = readEnv('TABLE1_NAME', 'USER1_TABLE', 'APP_USER1_TABLE') || 'base table';
+//     const data = await sql<Revenue[]>`SELECT * FROM ${sql(tableName)};`;
+
+//     return data;
+//   } catch (error) {
+//     console.error('Database Error:', error);
+//     throw new Error('Failed to fetch revenue data.');
+//   } finally {
+//     await sql.end();
+//   }
+// }
+
 export async function fetchStockData(userId: string) {
+  const sql = createSqlClient();
+
   try {
-    console.log('Fetching stock data for user:', userId);
-    
-    // Determine which table to query based on user ID
-    // user1: 410544b2-4001-4271-9855-fec4b6a6442a -> stock_table1
-    // user2: 410544b2-4001-4271-9855-fec4b6a6442b -> stock_table2
-    const tableName = userId === '410544b2-4001-4271-9855-fec4b6a6442a' ? 'stock_table1' : 'stock_table2';
-    
+    const tableName = resolveTableName(userId);
+
+    if (!tableName) {
+      throw new Error('Table name could not be resolved from input.');
+    }
+
     const data = await sql`SELECT * FROM ${sql(tableName)}`;
-    
+
     return data;
   } catch (error) {
     console.error('Database Error:', error);
     throw new Error('Failed to fetch stock data.');
+  } finally {
+    await sql.end();
   }
 }
 
-// export async function fetchLatestInvoices() {
-//   try {
-//     const data = await sql<LatestInvoiceRaw[]>`
-//       SELECT invoices.amount, customers.name, customers.image_url, customers.email, invoices.id
-//       FROM invoices
-//       JOIN customers ON invoices.customer_id = customers.id
-//       ORDER BY invoices.date DESC
-//       LIMIT 5`;
-    
-//     const latestInvoices = data.map((invoice) => ({
-//       ...invoice,
-//       amount: formatCurrency(invoice.amount),
-//     }));
-//     return latestInvoices;
-//   } catch (error) {
-//     console.error('Database Error:', error);
-//     throw new Error('Failed to fetch the latest invoices.');
-//   }
-// }
+export async function fetchStockRowById(tableName: string, rowId: string): Promise<StockRow | null> {
+  const sql = createSqlClient();
 
-// export async function fetchCardData() {
-//   try {
-//     // You can probably combine these into a single SQL query
-//     // However, we are intentionally splitting them to demonstrate
-//     // how to initialize multiple queries in parallel with JS.
-//     const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
-//     const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
-//     const invoiceStatusPromise = sql`SELECT
-//          SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
-//          SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
-//          FROM invoices`;
+  try {
+    const resolvedTableName = normalizeTableName(tableName);
+    const rows = await sql<StockRow[]>`
+      SELECT *
+      FROM ${sql(resolvedTableName)}
+      WHERE id = ${rowId}
+      LIMIT 1
+    `;
 
-//     const data = await Promise.all([
-//       invoiceCountPromise,
-//       customerCountPromise,
-//       invoiceStatusPromise,
-//     ]);
+    return rows[0] ?? null;
+  } finally {
+    await sql.end();
+  }
+}
 
-//     const numberOfInvoices = Number(data[0][0].count ?? '0');
-//     const numberOfCustomers = Number(data[1][0].count ?? '0');
-//     const totalPaidInvoices = formatCurrency(data[2][0].paid ?? '0');
-//     const totalPendingInvoices = formatCurrency(data[2][0].pending ?? '0');
+export async function updateStockRow(
+  tableName: string,
+  rowId: string,
+  updates: StockRow,
+): Promise<void> {
+  const sql = createSqlClient();
 
-//     return {
-//       numberOfCustomers,
-//       numberOfInvoices,
-//       totalPaidInvoices,
-//       totalPendingInvoices,
-//     };
-//   } catch (error) {
-//     console.error('Database Error:', error);
-//     throw new Error('Failed to fetch card data.');
-//   }
-// }
+  try {
+    const resolvedTableName = normalizeTableName(tableName);
+    const updateEntries = Object.entries(updates).filter(
+      ([columnName, value]) => columnName !== 'id' && value !== undefined,
+    );
 
-// const ITEMS_PER_PAGE = 6;
-// export async function fetchFilteredInvoices(
-//   query: string,
-//   currentPage: number,
-// ) {
-//   const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+    if (updateEntries.length === 0) {
+      return;
+    }
 
-//   try {
-//     const invoices = await sql<InvoicesTable[]>`
-//       SELECT
-//         invoices.id,
-//         invoices.amount,
-//         invoices.date,
-//         invoices.status,
-//         customers.name,
-//         customers.email,
-//         customers.image_url
-//       FROM invoices
-//       JOIN customers ON invoices.customer_id = customers.id
-//       WHERE
-//         customers.name ILIKE ${`%${query}%`} OR
-//         customers.email ILIKE ${`%${query}%`} OR
-//         invoices.amount::text ILIKE ${`%${query}%`} OR
-//         invoices.date::text ILIKE ${`%${query}%`} OR
-//         invoices.status ILIKE ${`%${query}%`}
-//       ORDER BY invoices.date DESC
-//       LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
-//     `;
+    const assignmentSql = updateEntries
+      .map(([columnName, value]) => `${quoteIdentifier(columnName)} = ${toSqlLiteral(value)}`)
+      .join(', ');
 
-//     return invoices;
-//   } catch (error) {
-//     console.error('Database Error:', error);
-//     throw new Error('Failed to fetch invoices.');
-//   }
-// }
+    await sql.unsafe(
+      `UPDATE ${quoteIdentifier(resolvedTableName)} SET ${assignmentSql} WHERE ${quoteIdentifier('id')} = ${toSqlLiteral(rowId)}`,
+    );
+  } finally {
+    await sql.end();
+  }
+}
 
-// export async function fetchInvoicesPages(query: string) {
-//   try {
-//     const data = await sql`SELECT COUNT(*)
-//     FROM invoices
-//     JOIN customers ON invoices.customer_id = customers.id
-//     WHERE
-//       customers.name ILIKE ${`%${query}%`} OR
-//       customers.email ILIKE ${`%${query}%`} OR
-//       invoices.amount::text ILIKE ${`%${query}%`} OR
-//       invoices.date::text ILIKE ${`%${query}%`} OR
-//       invoices.status ILIKE ${`%${query}%`}
-//   `;
+export async function deleteStockRow(tableName: string, rowId: string): Promise<void> {
+  const sql = createSqlClient();
 
-//     const totalPages = Math.ceil(Number(data[0].count) / ITEMS_PER_PAGE);
-//     return totalPages;
-//   } catch (error) {
-//     console.error('Database Error:', error);
-//     throw new Error('Failed to fetch total number of invoices.');
-//   }
-// }
+  try {
+    const resolvedTableName = normalizeTableName(tableName);
+    await sql.unsafe(
+      `DELETE FROM ${quoteIdentifier(resolvedTableName)} WHERE ${quoteIdentifier('id')} = ${toSqlLiteral(rowId)}`,
+    );
+  } finally {
+    await sql.end();
+  }
+}
 
-// export async function fetchInvoiceById(id: string) {
-//   try {
-//     const data = await sql<InvoiceForm[]>`
-//       SELECT
-//         invoices.id,
-//         invoices.customer_id,
-//         invoices.amount,
-//         invoices.status
-//       FROM invoices
-//       WHERE invoices.id = ${id};
-//     `;
 
-//     const invoice = data.map((invoice) => ({
-//       ...invoice,
-//       // Convert amount from cents to dollars
-//       amount: invoice.amount / 100,
-//     }));
-
-//     return invoice[0];
-//   } catch (error) {
-//     console.error('Database Error:', error);
-//     throw new Error('Failed to fetch invoice.');
-//   }
-// }
-
-// export async function fetchCustomers() {
-//   try {
-//     const customers = await sql<CustomerField[]>`
-//       SELECT
-//         id,
-//         name
-//       FROM customers
-//       ORDER BY name ASC
-//     `;
-
-//     return customers;
-//   } catch (err) {
-//     console.error('Database Error:', err);
-//     throw new Error('Failed to fetch all customers.');
-//   }
-// }
-
-// export async function fetchFilteredCustomers(query: string) {
-//   try {
-//     const data = await sql<CustomersTableType[]>`
-// 		SELECT
-// 		  customers.id,
-// 		  customers.name,
-// 		  customers.email,
-// 		  customers.image_url,
-// 		  COUNT(invoices.id) AS total_invoices,
-// 		  SUM(CASE WHEN invoices.status = 'pending' THEN invoices.amount ELSE 0 END) AS total_pending,
-// 		  SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END) AS total_paid
-// 		FROM customers
-// 		LEFT JOIN invoices ON customers.id = invoices.customer_id
-// 		WHERE
-// 		  customers.name ILIKE ${`%${query}%`} OR
-//         customers.email ILIKE ${`%${query}%`}
-// 		GROUP BY customers.id, customers.name, customers.email, customers.image_url
-// 		ORDER BY customers.name ASC
-// 	  `;
-
-//     const customers = data.map((customer) => ({
-//       ...customer,
-//       total_pending: formatCurrency(customer.total_pending),
-//       total_paid: formatCurrency(customer.total_paid),
-//     }));
-
-//     return customers;
-//   } catch (err) {
-//     console.error('Database Error:', err);
-//     throw new Error('Failed to fetch customer table.');
-//   }
-// }

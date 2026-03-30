@@ -1,60 +1,112 @@
 import postgres from 'postgres';
+import Link from 'next/link';
 import { ReactNode } from 'react';
+import { normalizeTableName } from '@/app/lib/auth';
 
 interface DatabaseRow {
-  [key: string]: string | number | boolean | object | null | undefined;
+  [key: string]: unknown;
 }
 
 interface TableViewProps {
-  title?: string;
+  tableName?: string;
   limit?: number;
+  selectedAccount?: string;
+  selectedWarehouse?: string;
 }
 
-// 1. This is a Server Component, so it can be 'async' and fetch data directly!
-export default async function DatabaseViewPage({
-  title = 'Neon Database Viewer',
-  limit = 50,
+export default async function StocksTable({
+  tableName = 'base table',
+  limit,
+  selectedAccount = '',
+  selectedWarehouse = '',
 }: TableViewProps): Promise<ReactNode> {
-  
-  // Initialize the connection
-  const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+  const connectionString = process.env.DATABASE_URL;
+
+  if (!connectionString) {
+    return (
+      <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        Missing database connection. Set DATABASE_URL in your environment.
+      </div>
+    );
+  }
+
+  const sql = postgres(connectionString, { ssl: 'require' });
+  const resolvedTableName = normalizeTableName(tableName);
 
   let dbData: DatabaseRow[] = [];
   let fetchError: string | null = null;
 
   try {
-    // 2. Fetch the data directly from database
-    const result: DatabaseRow[] = await sql`SELECT * FROM "base table" LIMIT ${limit}`;
+    const result: DatabaseRow[] =
+      typeof limit === 'number'
+        ? await sql`SELECT * FROM ${sql(resolvedTableName)} LIMIT ${limit}`
+        : await sql`SELECT * FROM ${sql(resolvedTableName)}`;
     dbData = result;
   } catch (error: unknown) {
     console.error('Failed to fetch data:', error);
     fetchError = error instanceof Error ? error.message : 'Unknown error occurred';
   } finally {
-    // Close the connection
     await sql.end();
   }
 
-  // 3. Handle Errors or Empty States
   if (fetchError) {
     return (
-      <div style={{ padding: '20px', color: 'red' }}>
-        <h2>Error loading data</h2>
-        <p>{fetchError}</p>
+      <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        Error loading {resolvedTableName}: {fetchError}
       </div>
     );
   }
 
   if (dbData.length === 0) {
-    return <div style={{ padding: '20px' }}>No records found in the database.</div>;
+    return (
+      <div className="rounded-md border border-gray-200 bg-white p-6 text-sm text-gray-600">
+        No rows found in {resolvedTableName}.
+      </div>
+    );
   }
 
-  // 4. Dynamically extract the headers from the first row of data
   const tableHeaders: string[] = Object.keys(dbData[0]);
+  const hasRowActions = dbData.some((row) => row.id !== null && row.id !== undefined && String(row.id).trim().length > 0);
 
-  // 5. Helper function to format cell values
+  const findColumnByName = (name: string): string | undefined => {
+    const exactMatch = tableHeaders.find((header) => header.toLowerCase() === name.toLowerCase());
+    if (exactMatch) {
+      return exactMatch;
+    }
+    return tableHeaders.find((header) => header.toLowerCase().includes(name.toLowerCase()));
+  };
+
+  const accountColumn = findColumnByName('account');
+  const warehouseColumn = findColumnByName('warehouse');
+
+  const accountOptions = accountColumn
+    ? Array.from(new Set(dbData.map((row) => String(row[accountColumn] ?? '').trim()).filter(Boolean))).sort()
+    : [];
+
+  const warehouseOptions = warehouseColumn
+    ? Array.from(new Set(dbData.map((row) => String(row[warehouseColumn] ?? '').trim()).filter(Boolean))).sort()
+    : [];
+
+  const filteredRows = dbData.filter((row) => {
+    const accountMatches =
+      !selectedAccount || !accountColumn
+        ? true
+        : String(row[accountColumn] ?? '').trim() === selectedAccount;
+
+    const warehouseMatches =
+      !selectedWarehouse || !warehouseColumn
+        ? true
+        : String(row[warehouseColumn] ?? '').trim() === selectedWarehouse;
+
+    return accountMatches && warehouseMatches;
+  });
+
   const formatCellValue = (value: unknown): string => {
     if (value === null || value === undefined) {
       return '';
+    }
+    if (value instanceof Date) {
+      return value.toISOString();
     }
     if (typeof value === 'object') {
       return JSON.stringify(value);
@@ -62,56 +114,125 @@ export default async function DatabaseViewPage({
     return String(value);
   };
 
-  // 6. Render the UI
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
-      <h1 style={{ marginBottom: '20px' }}>{title}</h1>
-      
-      <div style={{ overflowX: 'auto' }}>
-        <table 
-          border={1}
-          cellPadding={12}
-          style={{ 
-            borderCollapse: 'collapse', 
-            width: '100%',
-            textAlign: 'left',
-            border: '1px solid #ddd',
-          }}
-        >
-          <thead style={{ backgroundColor: '#f3f4f6' }}>
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <div className="border-b border-gray-200 p-4">
+        <form className="space-y-4" method="get">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-semibold text-sky-600" htmlFor="account-filter">
+                Account
+              </label>
+              <select
+                id="account-filter"
+                name="account"
+                defaultValue={selectedAccount}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700"
+              >
+                <option value="">Select Account</option>
+                {accountOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-semibold text-sky-600" htmlFor="warehouse-filter">
+                Warehouse
+              </label>
+              <select
+                id="warehouse-filter"
+                name="warehouse"
+                defaultValue={selectedWarehouse}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700"
+              >
+                <option value="">Select Warehouse</option>
+                {warehouseOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <a
+              href="/dashboard/stocks"
+              className="rounded-md border border-sky-400 px-5 py-2 text-sm font-semibold text-sky-500 hover:bg-sky-50"
+            >
+              Reset
+            </a>
+            <button
+              type="submit"
+              className="rounded-md border border-sky-400 bg-white px-5 py-2 text-sm font-semibold text-sky-500 hover:bg-sky-50"
+            >
+              Search
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="p-4">
+        <p className="mb-3 text-sm text-gray-600">Showing {filteredRows.length} rows</p>
+
+        <table className="w-full table-fixed border text-left text-xs text-gray-700">
+          <thead className="bg-gray-50 text-[11px] uppercase tracking-wide text-sky-600">
             <tr>
-              {/* Generate headers dynamically */}
               {tableHeaders.map((header: string) => (
-                <th
-                  key={header}
-                  style={{
-                    textTransform: 'capitalize',
-                    borderBottom: '2px solid #ddd',
-                  }}
-                >
+                <th key={header} className="border-b px-2 py-2 font-semibold">
                   {header}
                 </th>
               ))}
+              {hasRowActions && (
+                <th className="border-b px-2 py-2 font-semibold">Actions</th>
+              )}
             </tr>
           </thead>
 
-          <tbody>
-            {/* Map over the rows of data */}
-            {dbData.map((row: DatabaseRow, rowIndex: number) => (
-              <tr
-                key={String(row.id) || rowIndex}
-                style={{ borderBottom: '1px solid #ddd' }}
-              >
-                {/* Map over the headers to insert the correct data into each column */}
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {filteredRows.map((row: DatabaseRow, rowIndex: number) => (
+              <tr key={String(row.id ?? rowIndex)}>
                 {tableHeaders.map((header: string) => (
-                  <td key={`${rowIndex}-${header}`}>
+                  <td key={`${rowIndex}-${header}`} className="break-words px-2 py-2 align-top">
                     {formatCellValue(row[header])}
                   </td>
                 ))}
+                {hasRowActions && (
+                  <td className="whitespace-nowrap px-2 py-2 align-top">
+                    {row.id ? (
+                      <div className="flex items-center gap-2">
+                        <Link
+                          href={`/dashboard/stocks/${encodeURIComponent(String(row.id))}/edit`}
+                          className="rounded-md border border-sky-300 px-3 py-1 text-xs font-semibold text-sky-700 hover:bg-sky-50"
+                        >
+                          Edit
+                        </Link>
+                        <form action="/api/stocks/delete" method="post">
+                          <input type="hidden" name="rowId" value={String(row.id)} />
+                          <button
+                            type="submit"
+                            className="rounded-md border border-red-300 px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                          >
+                            Delete
+                          </button>
+                        </form>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-400">No id</span>
+                    )}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
+
+        {filteredRows.length === 0 && (
+          <p className="mt-3 text-sm text-gray-500">No rows matched the selected filters.</p>
+        )}
       </div>
     </div>
   );
